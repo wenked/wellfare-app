@@ -1,15 +1,24 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import type { FormEvent } from 'react'; // Type-only import for FormEvent
 import { useAuth } from '../contexts/AuthContext';
-// import { useNavigate } from 'react-router-dom'; // No longer needed
+import { useNavigate } from 'react-router-dom'; // Added useNavigate
 
 const AuthPage: React.FC = () => {
 	const [email, setEmail] = useState('');
 	const [password, setPassword] = useState('');
 	const [isLogin, setIsLogin] = useState(true); // To toggle between Login and Signup
-	const { login, signup, isLoading } = useAuth();
-	// const navigate = useNavigate(); // No longer needed
+	const { user, login, signup, isLoading } = useAuth(); // Destructure user
+	const navigate = useNavigate(); // Initialize navigate
 	const [error, setError] = useState<string | null>(null);
+
+	useEffect(() => {
+		// If user is successfully authenticated and not loading, redirect to dashboard
+		// This handles the case where the user logs in on this page
+		if (user && !isLoading) {
+			console.log('[AuthPage] User authenticated, navigating to /dashboard');
+			navigate('/dashboard', { replace: true });
+		}
+	}, [user, isLoading, navigate]); // Depend on user, isLoading, and navigate
 
 	const handleSubmit = async (e: FormEvent) => {
 		e.preventDefault();
