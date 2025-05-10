@@ -4,40 +4,7 @@ import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-
 // Define a type for the fields that can be updated in the call_logs table by the webhook
 interface CallLogUpdatableFields {
 	status: string;
-	outcome: string | null;
-	call_started_at: string | null;
-	call_ended_at: string | null;
-	call_duration_seconds: number | null;
-	call_response: any; // JSONB can be complex, using any for simplicity here or define a more specific type if needed
-}
-
-// Helper function to parse transcript for DTMF-like input
-// This is a simplified example and might need to be made more robust
-// based on how Retell structures the transcript for DTMF.
-function parseTranscriptForOutcome(transcript: string | null | undefined): string | null {
-	if (!transcript) {
-		return null;
-	}
-	// Example: "Hi [Name], this is a friendly welfare check-in. Please press 1 if you are okay, or press 2 if you need assistance."
-	// We need to see how Retell's ASR captures this.
-	// Look for explicit mentions or patterns.
-	const lowerTranscript = transcript.toLowerCase();
-	if (
-		lowerTranscript.includes('pressed 1') ||
-		lowerTranscript.includes('user said one') ||
-		lowerTranscript.includes('input 1')
-	) {
-		return 'ok';
-	}
-	if (
-		lowerTranscript.includes('pressed 2') ||
-		lowerTranscript.includes('user said two') ||
-		lowerTranscript.includes('input 2')
-	) {
-		return 'needs_assistance';
-	}
-	// Add more sophisticated parsing if needed
-	return 'no_response_to_prompt'; // Default if specific input not found
+	call_response: string;
 }
 
 // Helper function to map Retell's disconnection_reason and call_status to our internal status
@@ -51,6 +18,7 @@ function mapRetellStatus(retellCallStatus?: string, disconnectionReason?: string
 				return 'completed_transferred';
 			case 'error_internal':
 			case 'error_telephony':
+			case 'dial_failed':
 				return 'failed';
 			// Add more specific Retell disconnection reasons if known
 		}
@@ -62,13 +30,15 @@ function mapRetellStatus(retellCallStatus?: string, disconnectionReason?: string
 				return 'completed';
 			case 'failed':
 			case 'busy':
-			case 'no-answer': // Check exact string from Retell if it differs
+			case 'no-answer':
 			case 'canceled':
-				return retellCallStatus; // Or map to your own 'failed', 'no_answer' etc.
+				return retellCallStatus;
 			case 'in-progress':
 			case 'ringing':
 			case 'queued':
-				return 'in_progress'; // or more granular
+				return 'in_progress';
+			case 'error':
+				return 'failed';
 		}
 	}
 	return 'unknown'; // Default status
@@ -160,10 +130,6 @@ serve(async (req: Request) => {
 			case 'call_started': {
 				callLogUpdate = {
 					status: call.call_status === 'ringing' ? 'ringing' : 'in_progress',
-					call_started_at: new Date(call.start_timestamp).toISOString(),
-					// Ensure retell_call_id was set by your 'schedule-welfare-call' function.
-					// If not, and it's the first time we see this call_id, we might create a log.
-					// However, it's better if 'schedule-welfare-call' creates the initial log entry.
 				};
 				statusUpdateRequired = true;
 				break;
@@ -171,31 +137,15 @@ serve(async (req: Request) => {
 			case 'call_ended': {
 				callLogUpdate = {
 					status: mapRetellStatus(call.call_status, call.disconnection_reason),
-					outcome: parseTranscriptForOutcome(call.transcript),
-					call_ended_at: new Date(call.end_timestamp).toISOString(),
-					call_duration_seconds:
-						call.start_timestamp && call.end_timestamp
-							? (call.end_timestamp - call.start_timestamp) / 1000
-							: null,
-					call_response: { event_type: event, ...call }, // Store entire event payload
+					call_response: JSON.stringify(payload), // Store entire event payload
 				};
 				statusUpdateRequired = true;
 				break;
 			}
 			case 'call_analyzed': {
-				// To safely merge with existing retell_raw_response, fetch first (or handle potential null)
-				const currentLog = await supabase
-					.from('call_logs')
-					.select('call_response')
-					.eq('retell_call_id', call.call_id)
-					.single();
-
 				callLogUpdate = {
 					status: mapRetellStatus(call.call_status, call.disconnection_reason),
-					call_response: {
-						...(currentLog.data?.call_response || {}),
-						call_analysis: call.call_analysis,
-					},
+					call_response: JSON.stringify(payload),
 				};
 				if (call.call_analysis) {
 					statusUpdateRequired = true;
@@ -211,10 +161,7 @@ serve(async (req: Request) => {
 		if (statusUpdateRequired && Object.keys(callLogUpdate).length > 0) {
 			const { data, error } = await supabase
 				.from('call_logs')
-				.update(callLogUpdate as any) // Using 'as any' here if types for update are complex due to Partial,
-				// or ensure callLogUpdate perfectly matches a subset of table columns.
-				// A more robust solution would be to ensure the type passed to .update()
-				// matches what Supabase client expects for its generic update type.
+				.update(callLogUpdate)
 				.eq('retell_call_id', call.call_id)
 				.select();
 

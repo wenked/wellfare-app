@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { supabase } from '../supabaseClient';
 import { useAuth } from '../contexts/AuthContext';
+import ReactJson from 'react-json-view';
 // import { Link } from 'react-router-dom'; // Uncomment if you add the "Schedule New Call" button
 
 // Define a type for our call log entries
@@ -10,15 +11,57 @@ interface CallLog {
 	phone_number: string;
 	created_at: string; // Consider formatting this date
 	status: string;
-	call_response: string | null;
+	// Accommodate string (if needs parsing) or already parsed object for call_response
+	call_response: Record<string, unknown> | string | null;
+	custom_message: string | null;
 	// Add any other fields you expect to display
 }
+
+// Updated getSimpleOutcome to handle potentially stringified JSON in call_response
+const getSimpleOutcome = (callResponseInput: Record<string, unknown> | string | null): string => {
+	if (!callResponseInput) return 'N/A';
+	let callResponse: Record<string, unknown> | null = null;
+
+	if (typeof callResponseInput === 'string') {
+		try {
+			callResponse = JSON.parse(callResponseInput) as Record<string, unknown>;
+		} catch (e) {
+			console.error('Failed to parse call_response string:', e);
+			return 'Invalid Raw Data';
+		}
+	} else {
+		callResponse = callResponseInput;
+	}
+	if (!callResponse) return 'N/A'; // Should not happen if parsing is successful or input was object
+
+	const outcomeFromTranscript = callResponse.outcome_from_transcript;
+	if (typeof outcomeFromTranscript === 'string') {
+		return outcomeFromTranscript.replace('_', ' ').toUpperCase();
+	}
+
+	const callData = callResponse.call as Record<string, unknown> | undefined;
+	if (callData && typeof callData.disconnection_reason === 'string') {
+		const reason = callData.disconnection_reason as string;
+		if (reason.includes('hangup')) return 'Call Ended';
+		if (reason.includes('error')) return 'Error';
+		return reason.replace('_', ' ').toUpperCase();
+	}
+
+	const eventType = callResponse.event_type;
+	if (typeof eventType === 'string') {
+		return `Event: ${eventType.replace('_', ' ').toUpperCase()}`;
+	}
+	return 'Details in Raw';
+};
 
 const DashboardPage: React.FC = () => {
 	const { user } = useAuth();
 	const [callLogs, setCallLogs] = useState<CallLog[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
+	// State for modal
+	const [isModalOpen, setIsModalOpen] = useState(false);
+	const [modalData, setModalData] = useState<Record<string, unknown> | string | null>(null);
 
 	useEffect(() => {
 		const fetchCallLogs = async () => {
@@ -34,7 +77,9 @@ const DashboardPage: React.FC = () => {
 				// Ensure \'call_logs\' is the correct table name and RLS is set up
 				const { data, error: dbError } = await supabase
 					.from('call_logs') // This is the table we planned
-					.select('id, service_user_name, phone_number, created_at, status, call_response')
+					.select(
+						'id, service_user_name, phone_number, created_at, status, call_response, custom_message'
+					)
 					.eq('user_id', user.id) // Fetch logs for the current user
 					.order('created_at', { ascending: false }); // Show newest first
 
@@ -57,6 +102,16 @@ const DashboardPage: React.FC = () => {
 
 		fetchCallLogs();
 	}, [user]); // Refetch if user changes
+
+	const openModalWithData = (data: Record<string, unknown> | string | null) => {
+		setModalData(data);
+		setIsModalOpen(true);
+	};
+
+	const closeModal = () => {
+		setIsModalOpen(false);
+		setModalData(null);
+	};
 
 	if (loading) {
 		return (
@@ -129,13 +184,19 @@ const DashboardPage: React.FC = () => {
 										scope="col"
 										className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider"
 									>
+										Message Sent
+									</th>
+									<th
+										scope="col"
+										className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider"
+									>
 										Status
 									</th>
 									<th
 										scope="col"
 										className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider"
 									>
-										Outcome
+										Outcome / Raw Data
 									</th>
 								</tr>
 							</thead>
@@ -148,6 +209,12 @@ const DashboardPage: React.FC = () => {
 										<td className="px-6 py-4 whitespace-nowrap text-sm text-slate-700">{log.phone_number}</td>
 										<td className="px-6 py-4 whitespace-nowrap text-sm text-slate-700">
 											{new Date(log.created_at).toLocaleString()}
+										</td>
+										<td
+											className="px-6 py-4 whitespace-nowrap text-sm text-slate-700 truncate max-w-xs"
+											title={log.custom_message || 'N/A'}
+										>
+											{log.custom_message || 'N/A'}
 										</td>
 										<td className="px-6 py-4 whitespace-nowrap text-sm">
 											<span
@@ -174,8 +241,18 @@ const DashboardPage: React.FC = () => {
 												{log.status.replace('_', ' ')}
 											</span>
 										</td>
-										<td className="px-6 py-4 whitespace-nowrap text-sm text-slate-700">
-											{log.call_response ? log.call_response.replace('_', ' ').toUpperCase() : 'N/A'}
+										<td className="px-6 py-4 text-sm text-slate-700 align-top">
+											<div className="flex flex-col items-start">
+												<span className="capitalize">{getSimpleOutcome(log.call_response)}</span>
+												{log.call_response && (
+													<button
+														onClick={() => openModalWithData(log.call_response)}
+														className="mt-1 text-xs text-indigo-600 hover:text-indigo-800 underline"
+													>
+														View Raw Data
+													</button>
+												)}
+											</div>
 										</td>
 									</tr>
 								))}
@@ -184,6 +261,34 @@ const DashboardPage: React.FC = () => {
 					</div>
 				)}
 			</main>
+
+			{/* Modal for JSON Viewer */}
+			{isModalOpen && modalData && (
+				<div className="fixed inset-0 bg-[rgba(0,0,0,0.5)] flex items-center justify-center z-50 p-4">
+					<div className="bg-white p-6 rounded-lg shadow-xl max-w-2xl w-full max-h-[80vh] flex flex-col">
+						<div className="flex justify-between items-center mb-4">
+							<h4 className="text-lg font-semibold text-slate-800">Raw Call Data</h4>
+							<button
+								onClick={closeModal}
+								className="text-slate-500 hover:text-slate-700 text-2xl font-bold"
+								aria-label="Close modal"
+							>
+								&times;
+							</button>
+						</div>
+						<div className="overflow-y-auto flex-grow" /* style={{ minHeight: '200px' }} */>
+							<ReactJson
+								src={typeof modalData === 'string' ? JSON.parse(modalData) : modalData}
+								theme="rjv-default"
+								collapsed={1}
+								displayDataTypes={false}
+								enableClipboard={true} // Enable clipboard for modals usually good UX
+								style={{ padding: '1rem', fontSize: '0.8rem' }}
+							/>
+						</div>
+					</div>
+				</div>
+			)}
 		</div>
 	);
 };
