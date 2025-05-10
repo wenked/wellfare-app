@@ -54,6 +54,8 @@ const getSimpleOutcome = (callResponseInput: Record<string, unknown> | string | 
 	return 'Details in Raw';
 };
 
+const POLLING_INTERVAL = 30000; // 30 seconds
+
 const DashboardPage: React.FC = () => {
 	const { user } = useAuth();
 	const [callLogs, setCallLogs] = useState<CallLog[]>([]);
@@ -64,44 +66,65 @@ const DashboardPage: React.FC = () => {
 	const [modalData, setModalData] = useState<Record<string, unknown> | string | null>(null);
 
 	useEffect(() => {
-		const fetchCallLogs = async () => {
+		const fetchCallLogs = async (isInitialFetch = false) => {
 			if (!user) {
-				setLoading(false);
-				// setError(\'User not found, please log in.\'); // Or handle appropriately
+				if (isInitialFetch) setLoading(false);
 				return;
 			}
 
 			try {
-				setLoading(true);
-				setError(null);
-				// Ensure \'call_logs\' is the correct table name and RLS is set up
+				if (isInitialFetch) setLoading(true);
+				// For subsequent polls, we might not want to set global error,
+				// or have a different way to indicate a failed poll update.
+				// setError(null); // Clearing error on each poll might hide persistent issues.
+
 				const { data, error: dbError } = await supabase
-					.from('call_logs') // This is the table we planned
+					.from('call_logs')
 					.select(
 						'id, service_user_name, phone_number, created_at, status, call_response, custom_message'
 					)
-					.eq('user_id', user.id) // Fetch logs for the current user
-					.order('created_at', { ascending: false }); // Show newest first
+					.eq('user_id', user.id)
+					.order('created_at', { ascending: false });
 
-				if (dbError) {
-					throw dbError;
-				}
-
+				if (dbError) throw dbError;
 				setCallLogs(data || []);
 			} catch (err) {
 				console.error('Error fetching call logs:', err);
-				if (err instanceof Error) {
-					setError(err.message || 'Failed to fetch call logs.');
-				} else {
-					setError('An unknown error occurred.');
+				// Only set general error on initial fetch or if it's a new error type.
+				if (isInitialFetch || (err instanceof Error && error !== err.message)) {
+					setError(
+						err instanceof Error ? err.message : 'An unknown error occurred while fetching data.'
+					);
 				}
 			} finally {
-				setLoading(false);
+				if (isInitialFetch) setLoading(false);
 			}
 		};
 
-		fetchCallLogs();
-	}, [user]); // Refetch if user changes
+		if (user) {
+			// Only fetch and set up polling if user is available
+			fetchCallLogs(true); // Initial fetch
+
+			const intervalId = setInterval(() => {
+				console.log('[DashboardPage] Polling for call logs...');
+				fetchCallLogs(); // Subsequent fetches by poller
+			}, POLLING_INTERVAL);
+
+			// Cleanup function to clear the interval when the component unmounts or user changes
+			return () => {
+				console.log('[DashboardPage] Clearing call log polling interval.');
+				clearInterval(intervalId);
+			};
+		} else {
+			// If there's no user, ensure loading is false and logs are empty
+			setLoading(false);
+			setCallLogs([]);
+			setError(null);
+		}
+	}, [user, error]); // Added `error` to dependency array to re-evaluate if an error state needs clearing/handling related to polling.
+	// Be cautious with adding `error` here if setError inside fetchCallLogs isn't handled carefully,
+	// as it could lead to loops if an error keeps re-triggering the effect that then tries to fetch again.
+	// For now, setError is conditional on `isInitialFetch` for new errors.
 
 	const openModalWithData = (data: Record<string, unknown> | string | null) => {
 		setModalData(data);
